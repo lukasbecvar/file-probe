@@ -1,0 +1,17 @@
+# File probe
+Basic utility for get information about files and directories.
+
+## Usage
+```bash
+file-probe <path>
+```
+
+## Installation
+```bash
+git clone git@github.com:lukasbecvar/file-probe.git
+cd file-probe
+sudo make install
+```
+
+## License
+This software is licensed under the [MIT license](LICENSE).
