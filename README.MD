@@ -1,6 +1,9 @@
 # File probe
 Basic utility for get information about files and directories.
 
+## Preview
+![file-probe preview](.github/assets/preview.png)
+
 ## Usage
 ```bash
 file-probe <path>

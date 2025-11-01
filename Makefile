@@ -3,7 +3,7 @@ CXX      = g++
 CXXFLAGS = -std=c++17 -O2 -Wall
 LIBS     = -lavformat -lavutil -lm
 TARGET   = file-probe
-SRC      = main.cpp
+SRC      = file-probe.cpp
 
 # default target: build the binary
 all: $(TARGET)
