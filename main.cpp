@@ -86,6 +86,8 @@
 #include <cctype>
 #include <arpa/inet.h>
 #include <cstring>
+#include <pwd.h>
+#include <grp.h>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -142,6 +144,22 @@ std::string shell_escape(const std::string& input) {
     }
     escaped += "'";
     return escaped;
+}
+
+std::string get_username(uid_t uid) {
+    if (struct passwd* pwd = getpwuid(uid)) {
+        if (pwd->pw_name && std::strlen(pwd->pw_name) > 0)
+            return pwd->pw_name;
+    }
+    return std::to_string(uid);
+}
+
+std::string get_groupname(gid_t gid) {
+    if (struct group* grp = getgrgid(gid)) {
+        if (grp->gr_name && std::strlen(grp->gr_name) > 0)
+            return grp->gr_name;
+    }
+    return std::to_string(gid);
 }
 
 std::string compute_sha256(const fs::path& p) {
@@ -452,8 +470,8 @@ void print_file_info(const fs::path& p) {
 
         struct stat fileStat;
         if (target_exists && stat(p.c_str(), &fileStat) == 0) {
-            std::cout << COLOR_KEY << "Owner UID: " << COLOR_VALUE << fileStat.st_uid << COLOR_RESET << "\n";
-            std::cout << COLOR_KEY << "Group GID: " << COLOR_VALUE << fileStat.st_gid << COLOR_RESET << "\n";
+            std::cout << COLOR_KEY << "Owner: " << COLOR_VALUE << get_username(fileStat.st_uid) << COLOR_RESET << "\n";
+            std::cout << COLOR_KEY << "Group: " << COLOR_VALUE << get_groupname(fileStat.st_gid) << COLOR_RESET << "\n";
             std::cout << COLOR_KEY << "Last Access Time: " << COLOR_VALUE << get_time(fileStat.st_atime) << COLOR_RESET << "\n";
             std::cout << COLOR_KEY << "Last Modify Time: " << COLOR_VALUE << get_time(fileStat.st_mtime) << COLOR_RESET << "\n";
             std::cout << COLOR_KEY << "Last Change Time: " << COLOR_VALUE << get_time(fileStat.st_ctime) << COLOR_RESET << "\n";
