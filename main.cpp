@@ -116,6 +116,22 @@ std::string format_size(uintmax_t size) {
     return oss.str();
 }
 
+void print_help(const std::string& program_name) {
+    std::cout
+        << "Usage: " << program_name << " <path>\n"
+        << "\n"
+        << "Inspect a file or directory and display detailed information:\n"
+        << "  - Type detection for regular files and directories\n"
+        << "  - Unix-style permissions, ownership, and timestamps\n"
+        << "  - Human-readable size for files and recursive totals for directories\n"
+        << "  - SHA-256 checksum for regular files\n"
+        << "  - Media insights (resolution, duration, codec, bitrate) via ffprobe\n"
+        << "  - Image metadata (channel count) via stb_image\n"
+        << "\n"
+        << "Options:\n"
+        << "  -h, -help, --help    Show this help message and exit\n";
+}
+
 std::string shell_escape(const std::string& input) {
     std::string escaped = "'";
     for (char c : input) {
@@ -502,11 +518,22 @@ void print_file_info(const fs::path& p) {
 }
 
 int main(int argc, char* argv[]) {
+    // show command usage hint
     if (argc != 2) {
         std::cerr << COLOR_ERROR << "Usage: " << argv[0] << " <file_path>" << COLOR_RESET << "\n";
         return 1;
     }
+    
+    // get file path argument
     std::string file_path = argv[1];
+    
+    // show help
+    if (file_path == "-h" || file_path == "--help" || file_path == "-help") {
+        print_help(argv[0]);
+        return 0;
+    }
+    
+    // file info init
     print_file_info(file_path);
     return 0;
 }
