@@ -80,6 +80,7 @@
 #include <cstdlib>
 #include <string>
 #include <sstream>
+#include <iomanip>
 #include <algorithm>
 #include <cctype>
 #include <arpa/inet.h>
@@ -109,7 +110,7 @@ std::string format_size(uintmax_t size) {
         i++;
     }
     std::ostringstream oss;
-    oss.precision(2);
+    oss << std::fixed << std::setprecision(i == 0 ? 0 : 2);
     oss << size_in_units << " " << units[i];
     return oss.str();
 }
