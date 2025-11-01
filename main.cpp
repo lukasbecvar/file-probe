@@ -81,6 +81,7 @@
 #include <string>
 #include <sstream>
 #include <iomanip>
+#include <vector>
 #include <algorithm>
 #include <cctype>
 #include <arpa/inet.h>
@@ -113,6 +114,41 @@ std::string format_size(uintmax_t size) {
     oss << std::fixed << std::setprecision(i == 0 ? 0 : 2);
     oss << size_in_units << " " << units[i];
     return oss.str();
+}
+
+std::string shell_escape(const std::string& input) {
+    std::string escaped = "'";
+    for (char c : input) {
+        if (c == '\'')
+            escaped += "'\\''";
+        else
+            escaped += c;
+    }
+    escaped += "'";
+    return escaped;
+}
+
+std::string compute_sha256(const fs::path& p) {
+    if (!fs::exists(p))
+        return "File not accessible";
+
+    std::string command = "sha256sum " + shell_escape(p.string());
+    char buffer[256];
+    std::string result;
+    FILE* fp = popen(command.c_str(), "r");
+    if (!fp)
+        return "Unable to compute checksum";
+
+    if (fgets(buffer, sizeof(buffer), fp))
+        result = buffer;
+    pclose(fp);
+
+    if (result.empty())
+        return "Unable to compute checksum";
+
+    std::string checksum = result.substr(0, result.find_first_of(" \t"));
+    checksum.erase(std::remove_if(checksum.begin(), checksum.end(), ::isspace), checksum.end());
+    return checksum;
 }
 
 std::string get_time(time_t t) {
@@ -230,14 +266,14 @@ std::string get_video_resolution(const fs::path& p) {
 }
 
 std::string get_media_duration(const fs::path& p) {
-    std::string command = "ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 \"" + p.string() + "\"";
+    std::string command = "ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 " + shell_escape(p.string());
     char buffer[128];
     std::string result;
     FILE* fp = popen(command.c_str(), "r");
     if (fp) {
         while (fgets(buffer, sizeof(buffer), fp))
             result += buffer;
-        fclose(fp);
+        pclose(fp);
     }
     if (result.empty())
         return "Unable to get duration";
@@ -259,6 +295,24 @@ std::string get_media_duration(const fs::path& p) {
     return formatted_duration.str();
 }
 
+std::string format_bit_rate(long long bits_per_sec) {
+    if (bits_per_sec <= 0)
+        return "Unknown";
+
+    const char* units[] = { "b/s", "kb/s", "Mb/s", "Gb/s" };
+    double rate = static_cast<double>(bits_per_sec);
+    int unit_index = 0;
+    while (rate >= 1000.0 && unit_index < 3) {
+        rate /= 1000.0;
+        unit_index++;
+    }
+
+    std::ostringstream oss;
+    int precision = (rate < 10.0) ? 2 : (rate < 100.0 ? 1 : 0);
+    oss << std::fixed << std::setprecision(precision) << rate << " " << units[unit_index];
+    return oss.str();
+}
+
 std::string get_media_resolution(const fs::path& p) {
     std::string file_extension = p.extension().string();
     std::transform(file_extension.begin(), file_extension.end(), file_extension.begin(), ::tolower);
@@ -273,19 +327,115 @@ std::string get_media_resolution(const fs::path& p) {
     return "Unsupported file type";
 }
 
+std::string get_media_metadata(const fs::path& p) {
+    std::string command = "ffprobe -v error -show_entries format=format_name,bit_rate -show_entries stream=codec_name "
+                          "-of default=noprint_wrappers=1 " + shell_escape(p.string());
+    char buffer[256];
+    std::string result;
+    FILE* fp = popen(command.c_str(), "r");
+    if (fp) {
+        while (fgets(buffer, sizeof(buffer), fp))
+            result += buffer;
+        pclose(fp);
+    }
+    if (result.empty())
+        return "No metadata available";
+
+    std::istringstream iss(result);
+    std::string line;
+    std::string format_name;
+    std::string bitrate_value;
+    std::vector<std::string> codecs;
+
+    while (std::getline(iss, line)) {
+        if (line.rfind("format_name=", 0) == 0) {
+            format_name = line.substr(std::string("format_name=").size());
+        } else if (line.rfind("bit_rate=", 0) == 0) {
+            bitrate_value = line.substr(std::string("bit_rate=").size());
+        } else if (line.rfind("codec_name=", 0) == 0) {
+            codecs.push_back(line.substr(std::string("codec_name=").size()));
+        }
+    }
+
+    std::ostringstream metadata;
+    bool has_value = false;
+    if (!format_name.empty()) {
+        metadata << "Format: " << format_name;
+        has_value = true;
+    }
+    if (!codecs.empty()) {
+        if (has_value)
+            metadata << " | ";
+        metadata << "Codec: ";
+        for (size_t i = 0; i < codecs.size(); ++i) {
+            if (i > 0)
+                metadata << ", ";
+            metadata << codecs[i];
+        }
+        has_value = true;
+    }
+
+    if (!bitrate_value.empty()) {
+        long long bitrate_number = 0;
+        try {
+            bitrate_number = std::stoll(bitrate_value);
+        } catch (...) {
+            bitrate_number = 0;
+        }
+        if (has_value)
+            metadata << " | ";
+        metadata << "Bitrate: " << format_bit_rate(bitrate_number);
+        has_value = true;
+    }
+
+    if (!has_value)
+        return "No metadata available";
+
+    return metadata.str();
+}
+
+std::string get_image_metadata(const fs::path& p) {
+    int width = 0, height = 0, channels = 0;
+    if (stbi_info(p.c_str(), &width, &height, &channels)) {
+        std::ostringstream oss;
+        oss << "Channels: " << channels;
+        return oss.str();
+    }
+    return "Unable to read image metadata";
+}
+
 void print_file_info(const fs::path& p) {
     try {
-        if (!fs::exists(p)) {
+        fs::file_status link_status = fs::symlink_status(p);
+        bool is_symlink = fs::is_symlink(link_status);
+        bool target_exists = fs::exists(p);
+
+        if (!target_exists && !is_symlink) {
             std::cerr << COLOR_ERROR << "Error: File does not exist!" << COLOR_RESET << "\n";
             return;
         }
-        fs::path abs_path = fs::canonical(p);
+
+        fs::path abs_path = fs::absolute(p);
         std::cout << COLOR_KEY << "Path: " << COLOR_VALUE << abs_path << COLOR_RESET << "\n";
-        std::cout << COLOR_KEY << "Type: " << COLOR_VALUE << get_file_type(p) << COLOR_RESET << "\n";
-        std::cout << COLOR_KEY << "Permissions: " << COLOR_VALUE << get_permissions(fs::status(p).permissions()) << COLOR_RESET << "\n";
+        std::string type_info = target_exists ? get_file_type(p) : (is_symlink ? "Broken Symlink" : "Unknown");
+        std::cout << COLOR_KEY << "Type: " << COLOR_VALUE << type_info << COLOR_RESET << "\n";
+        std::cout << COLOR_KEY << "Symlink: " << COLOR_VALUE << (is_symlink ? "Yes" : "No") << COLOR_RESET << "\n";
+        if (is_symlink) {
+            std::cout << COLOR_KEY << "Symlink Target: " << COLOR_VALUE;
+            try {
+                std::cout << fs::read_symlink(p);
+            } catch (const fs::filesystem_error&) {
+                std::cout << "Unable to resolve target";
+            }
+            std::cout << COLOR_RESET << "\n";
+        }
+        if (target_exists) {
+            fs::perms perms = fs::status(p).permissions();
+            std::cout << COLOR_KEY << "Permissions: " << COLOR_VALUE << get_permissions(perms) << COLOR_RESET << "\n";
+        }
 
         struct stat fileStat;
-        if (stat(p.c_str(), &fileStat) == 0) {
+        if (target_exists && stat(p.c_str(), &fileStat) == 0) {
             std::cout << COLOR_KEY << "Owner UID: " << COLOR_VALUE << fileStat.st_uid << COLOR_RESET << "\n";
             std::cout << COLOR_KEY << "Group GID: " << COLOR_VALUE << fileStat.st_gid << COLOR_RESET << "\n";
             std::cout << COLOR_KEY << "Last Access Time: " << COLOR_VALUE << get_time(fileStat.st_atime) << COLOR_RESET << "\n";
@@ -293,20 +443,41 @@ void print_file_info(const fs::path& p) {
             std::cout << COLOR_KEY << "Last Change Time: " << COLOR_VALUE << get_time(fileStat.st_ctime) << COLOR_RESET << "\n";
         }
 
-        if (fs::is_regular_file(p)) {
+        if (target_exists && fs::is_regular_file(p)) {
             uintmax_t file_size = fs::file_size(p);
             std::cout << COLOR_KEY << "Size: " << COLOR_VALUE << format_size(file_size) << COLOR_RESET << "\n";
-            std::cout << COLOR_KEY << "Resolution: " << COLOR_VALUE << get_media_resolution(p) << COLOR_RESET << "\n";
+            std::string checksum = compute_sha256(p);
+            std::cout << COLOR_KEY << "Checksum (SHA-256): " << COLOR_VALUE << checksum << COLOR_RESET << "\n";
 
             std::string file_extension = p.extension().string();
             std::transform(file_extension.begin(), file_extension.end(), file_extension.begin(), ::tolower);
+            bool is_image = (file_extension == ".jpg" || file_extension == ".jpeg" ||
+                             file_extension == ".png" || file_extension == ".gif" ||
+                             file_extension == ".bmp" || file_extension == ".tiff");
+            bool is_video = (file_extension == ".mp4" || file_extension == ".avi" ||
+                             file_extension == ".mkv" || file_extension == ".mov" ||
+                             file_extension == ".flv");
+            bool is_audio = (file_extension == ".mp3" || file_extension == ".wav" ||
+                             file_extension == ".flac" || file_extension == ".aac" ||
+                             file_extension == ".ogg");
+
+            if (is_image || is_video) {
+                std::cout << COLOR_KEY << "Resolution: " << COLOR_VALUE << get_media_resolution(p) << COLOR_RESET << "\n";
+            }
+
+            if (is_image) {
+                std::cout << COLOR_KEY << "Metadata: " << COLOR_VALUE << get_image_metadata(p) << COLOR_RESET << "\n";
+            } else if (is_audio || is_video) {
+                std::cout << COLOR_KEY << "Metadata: " << COLOR_VALUE << get_media_metadata(p) << COLOR_RESET << "\n";
+            }
+
             if (file_extension == ".mp3" || file_extension == ".wav" || file_extension == ".flac" ||
                 file_extension == ".aac" || file_extension == ".ogg" ||
                 file_extension == ".mp4" || file_extension == ".avi" || file_extension == ".mkv" ||
                 file_extension == ".mov" || file_extension == ".flv") {
                 std::cout << COLOR_KEY << "Duration: " << COLOR_VALUE << get_media_duration(p) << COLOR_RESET << "\n";
             }
-        } else if (fs::is_directory(p)) {
+        } else if (target_exists && fs::is_directory(p)) {
             uintmax_t total_size = 0;
             size_t file_count = 0, dir_count = 0;
             for (const auto &entry : fs::recursive_directory_iterator(p)) {
@@ -318,7 +489,7 @@ void print_file_info(const fs::path& p) {
                         dir_count++;
                     }
                 } catch (const fs::filesystem_error &e) {
-                    // Skip files/directories which cannot be accessed
+                    // skip files/directories which cannot be accessed
                 }
             }
             std::cout << COLOR_KEY << "Total Size: " << COLOR_VALUE << format_size(total_size) << COLOR_RESET << "\n";
