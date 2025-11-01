@@ -1,7 +1,15 @@
 # compiler settings
-CXX      = g++
-CXXFLAGS = -std=c++17 -O2 -Wall
-LIBS     = -lavformat -lavutil -lm
+CXX            = g++
+PKG_CONFIG    ?= pkg-config
+FFMPEG_CFLAGS := $(shell $(PKG_CONFIG) --cflags libavformat 2>/dev/null)
+FFMPEG_LIBS   := $(shell $(PKG_CONFIG) --libs libavformat 2>/dev/null)
+
+ifeq ($(FFMPEG_LIBS),)
+FFMPEG_LIBS = -lavformat -lavcodec -lavutil -lswresample -lswscale
+endif
+
+CXXFLAGS = -std=c++17 -O2 -Wall $(FFMPEG_CFLAGS)
+LIBS     = $(FFMPEG_LIBS) -lm
 TARGET   = file-probe
 SRC      = file-probe.cpp
 
