@@ -120,7 +120,7 @@ std::string format_size(uintmax_t size) {
 
 void print_help(const std::string& program_name) {
     std::cout
-        << "Usage: " << program_name << " <path>\n"
+        << "Usage: " << program_name << " [options] <path>\n"
         << "\n"
         << "Inspect a file or directory and display detailed information:\n"
         << "  - Type detection for regular files and directories\n"
@@ -131,7 +131,8 @@ void print_help(const std::string& program_name) {
         << "  - Image metadata (channel count) via stb_image\n"
         << "\n"
         << "Options:\n"
-        << "  -h, -help, --help    Show this help message and exit\n";
+        << "  -h, -help, --help    Show this help message and exit\n"
+        << "  --json               Emit machine-readable JSON instead of colored text\n";
 }
 
 std::string shell_escape(const std::string& input) {
@@ -144,6 +145,31 @@ std::string shell_escape(const std::string& input) {
     }
     escaped += "'";
     return escaped;
+}
+
+std::string json_escape(const std::string& input) {
+    std::ostringstream oss;
+    for (unsigned char c : input) {
+        switch (c) {
+            case '"': oss << "\\\""; break;
+            case '\\': oss << "\\\\"; break;
+            case '\b': oss << "\\b"; break;
+            case '\f': oss << "\\f"; break;
+            case '\n': oss << "\\n"; break;
+            case '\r': oss << "\\r"; break;
+            case '\t': oss << "\\t"; break;
+            default:
+                if (c < 0x20 || c > 0x7E) {
+                    oss << "\\u"
+                        << std::hex << std::uppercase << std::setw(4) << std::setfill('0')
+                        << static_cast<int>(c)
+                        << std::dec << std::nouppercase;
+                } else {
+                    oss << static_cast<char>(c);
+                }
+        }
+    }
+    return oss.str();
 }
 
 std::string get_username(uid_t uid) {
@@ -438,50 +464,65 @@ std::string get_image_metadata(const fs::path& p) {
     return "Unable to read image metadata";
 }
 
-void print_file_info(const fs::path& p) {
+void print_file_info(const fs::path& p, bool json_mode) {
     try {
         fs::file_status link_status = fs::symlink_status(p);
         bool is_symlink = fs::is_symlink(link_status);
         bool target_exists = fs::exists(p);
+        fs::path abs_path = fs::absolute(p);
 
         if (!target_exists && !is_symlink) {
-            std::cerr << COLOR_ERROR << "Error: File does not exist!" << COLOR_RESET << "\n";
+            if (json_mode) {
+                std::cout << "{\"path\":\"" << json_escape(abs_path.string()) << "\","
+                          << "\"error\":\"File does not exist\"}\n";
+            } else {
+                std::cerr << COLOR_ERROR << "Error: File does not exist!" << COLOR_RESET << "\n";
+            }
             return;
         }
-
-        fs::path abs_path = fs::absolute(p);
-        std::cout << COLOR_KEY << "Path: " << COLOR_VALUE << abs_path << COLOR_RESET << "\n";
         std::string type_info = target_exists ? get_file_type(p) : (is_symlink ? "Broken Symlink" : "Unknown");
-        std::cout << COLOR_KEY << "Type: " << COLOR_VALUE << type_info << COLOR_RESET << "\n";
-        std::cout << COLOR_KEY << "Symlink: " << COLOR_VALUE << (is_symlink ? "Yes" : "No") << COLOR_RESET << "\n";
+
+        std::string permissions;
+        if (target_exists)
+            permissions = get_permissions(fs::status(p).permissions());
+
+        std::string symlink_target;
+        bool symlink_target_resolved = false;
         if (is_symlink) {
-            std::cout << COLOR_KEY << "Symlink Target: " << COLOR_VALUE;
             try {
-                std::cout << fs::read_symlink(p);
+                symlink_target = fs::read_symlink(p).string();
+                symlink_target_resolved = true;
             } catch (const fs::filesystem_error&) {
-                std::cout << "Unable to resolve target";
+                symlink_target = "Unable to resolve target";
             }
-            std::cout << COLOR_RESET << "\n";
-        }
-        if (target_exists) {
-            fs::perms perms = fs::status(p).permissions();
-            std::cout << COLOR_KEY << "Permissions: " << COLOR_VALUE << get_permissions(perms) << COLOR_RESET << "\n";
         }
 
-        struct stat fileStat;
+        struct stat fileStat{};
+        bool have_stat = false;
         if (target_exists && stat(p.c_str(), &fileStat) == 0) {
-            std::cout << COLOR_KEY << "Owner: " << COLOR_VALUE << get_username(fileStat.st_uid) << COLOR_RESET << "\n";
-            std::cout << COLOR_KEY << "Group: " << COLOR_VALUE << get_groupname(fileStat.st_gid) << COLOR_RESET << "\n";
-            std::cout << COLOR_KEY << "Last Access Time: " << COLOR_VALUE << get_time(fileStat.st_atime) << COLOR_RESET << "\n";
-            std::cout << COLOR_KEY << "Last Modify Time: " << COLOR_VALUE << get_time(fileStat.st_mtime) << COLOR_RESET << "\n";
-            std::cout << COLOR_KEY << "Last Change Time: " << COLOR_VALUE << get_time(fileStat.st_ctime) << COLOR_RESET << "\n";
+            have_stat = true;
         }
 
-        if (target_exists && fs::is_regular_file(p)) {
-            uintmax_t file_size = fs::file_size(p);
-            std::cout << COLOR_KEY << "Size: " << COLOR_VALUE << format_size(file_size) << COLOR_RESET << "\n";
-            std::string checksum = compute_sha256(p);
-            std::cout << COLOR_KEY << "Checksum (SHA-256): " << COLOR_VALUE << checksum << COLOR_RESET << "\n";
+        std::string owner = have_stat ? get_username(fileStat.st_uid) : "";
+        std::string group = have_stat ? get_groupname(fileStat.st_gid) : "";
+        std::string last_access = have_stat ? get_time(fileStat.st_atime) : "";
+        std::string last_modify = have_stat ? get_time(fileStat.st_mtime) : "";
+        std::string last_change = have_stat ? get_time(fileStat.st_ctime) : "";
+
+        bool is_regular = target_exists && fs::is_regular_file(p);
+        bool is_directory = target_exists && fs::is_directory(p);
+
+        uintmax_t file_size = 0;
+        std::string file_size_pretty;
+        std::string checksum;
+        std::string resolution;
+        std::string metadata;
+        std::string duration;
+
+        if (is_regular) {
+            file_size = fs::file_size(p);
+            file_size_pretty = format_size(file_size);
+            checksum = compute_sha256(p);
 
             std::string file_extension = p.extension().string();
             std::transform(file_extension.begin(), file_extension.end(), file_extension.begin(), ::tolower);
@@ -495,25 +536,23 @@ void print_file_info(const fs::path& p) {
                              file_extension == ".flac" || file_extension == ".aac" ||
                              file_extension == ".ogg");
 
-            if (is_image || is_video) {
-                std::cout << COLOR_KEY << "Resolution: " << COLOR_VALUE << get_media_resolution(p) << COLOR_RESET << "\n";
-            }
+            if (is_image || is_video)
+                resolution = get_media_resolution(p);
 
             if (is_image) {
-                std::cout << COLOR_KEY << "Metadata: " << COLOR_VALUE << get_image_metadata(p) << COLOR_RESET << "\n";
+                metadata = get_image_metadata(p);
             } else if (is_audio || is_video) {
-                std::cout << COLOR_KEY << "Metadata: " << COLOR_VALUE << get_media_metadata(p) << COLOR_RESET << "\n";
+                metadata = get_media_metadata(p);
             }
 
-            if (file_extension == ".mp3" || file_extension == ".wav" || file_extension == ".flac" ||
-                file_extension == ".aac" || file_extension == ".ogg" ||
-                file_extension == ".mp4" || file_extension == ".avi" || file_extension == ".mkv" ||
-                file_extension == ".mov" || file_extension == ".flv") {
-                std::cout << COLOR_KEY << "Duration: " << COLOR_VALUE << get_media_duration(p) << COLOR_RESET << "\n";
-            }
-        } else if (target_exists && fs::is_directory(p)) {
-            uintmax_t total_size = 0;
-            size_t file_count = 0, dir_count = 0;
+            if (is_audio || is_video)
+                duration = get_media_duration(p);
+        }
+
+        uintmax_t total_size = 0;
+        size_t file_count = 0;
+        size_t dir_count = 0;
+        if (is_directory) {
             for (const auto &entry : fs::recursive_directory_iterator(p)) {
                 try {
                     if (fs::is_regular_file(entry.path())) {
@@ -522,36 +561,163 @@ void print_file_info(const fs::path& p) {
                     } else if (fs::is_directory(entry.path())) {
                         dir_count++;
                     }
-                } catch (const fs::filesystem_error &e) {
+                } catch (const fs::filesystem_error &) {
                     // skip files/directories which cannot be accessed
                 }
             }
-            std::cout << COLOR_KEY << "Total Size: " << COLOR_VALUE << format_size(total_size) << COLOR_RESET << "\n";
-            std::cout << COLOR_KEY << "File Count: " << COLOR_VALUE << file_count << COLOR_RESET << "\n";
-            std::cout << COLOR_KEY << "Directory Count: " << COLOR_VALUE << dir_count << COLOR_RESET << "\n";
+        }
+
+        if (json_mode) {
+            std::ostringstream json;
+            json << "{";
+            bool first = true;
+            auto add_comma = [&]() {
+                if (first)
+                    first = false;
+                else
+                    json << ",";
+            };
+            auto add_string = [&](const std::string& key, const std::string& value) {
+                add_comma();
+                json << "\"" << key << "\":\"" << json_escape(value) << "\"";
+            };
+            auto add_bool = [&](const std::string& key, bool value) {
+                add_comma();
+                json << "\"" << key << "\":" << (value ? "true" : "false");
+            };
+            auto add_number = [&](const std::string& key, uintmax_t value) {
+                add_comma();
+                json << "\"" << key << "\":" << value;
+            };
+            auto add_nullable_string = [&](const std::string& key, const std::string& value) {
+                add_comma();
+                json << "\"" << key << "\":";
+                if (value.empty())
+                    json << "null";
+                else
+                    json << "\"" << json_escape(value) << "\"";
+            };
+
+            add_string("path", abs_path.string());
+            add_string("type", type_info);
+            add_bool("isSymlink", is_symlink);
+            add_bool("targetExists", target_exists);
+
+            if (is_symlink) {
+                add_nullable_string("symlinkTarget", symlink_target_resolved ? symlink_target : "");
+                if (!symlink_target_resolved && !symlink_target.empty())
+                    add_string("symlinkError", symlink_target);
+            }
+
+            if (!permissions.empty())
+                add_string("permissions", permissions);
+
+            if (have_stat) {
+                add_string("owner", owner);
+                add_string("group", group);
+                add_nullable_string("lastAccess", last_access);
+                add_nullable_string("lastModify", last_modify);
+                add_nullable_string("lastChange", last_change);
+            }
+
+            if (is_regular) {
+                add_number("sizeBytes", file_size);
+                add_string("size", file_size_pretty);
+                add_nullable_string("checksumSha256", checksum);
+                if (!resolution.empty())
+                    add_string("resolution", resolution);
+                if (!metadata.empty())
+                    add_string("metadata", metadata);
+                if (!duration.empty())
+                    add_string("duration", duration);
+            }
+
+            if (is_directory) {
+                add_number("totalSizeBytes", total_size);
+                add_string("totalSize", format_size(total_size));
+                add_number("fileCount", file_count);
+                add_number("directoryCount", dir_count);
+            }
+
+            json << "}";
+            std::cout << json.str() << "\n";
+        } else {
+            std::cout << COLOR_KEY << "Path: " << COLOR_VALUE << abs_path << COLOR_RESET << "\n";
+            std::cout << COLOR_KEY << "Type: " << COLOR_VALUE << type_info << COLOR_RESET << "\n";
+            std::cout << COLOR_KEY << "Symlink: " << COLOR_VALUE << (is_symlink ? "Yes" : "No") << COLOR_RESET << "\n";
+            if (is_symlink) {
+                std::cout << COLOR_KEY << "Symlink Target: " << COLOR_VALUE
+                          << (symlink_target_resolved ? symlink_target : symlink_target.empty() ? "Unavailable" : symlink_target)
+                          << COLOR_RESET << "\n";
+            }
+            if (!permissions.empty())
+                std::cout << COLOR_KEY << "Permissions: " << COLOR_VALUE << permissions << COLOR_RESET << "\n";
+
+            if (have_stat) {
+                std::cout << COLOR_KEY << "Owner: " << COLOR_VALUE << owner << COLOR_RESET << "\n";
+                std::cout << COLOR_KEY << "Group: " << COLOR_VALUE << group << COLOR_RESET << "\n";
+                std::cout << COLOR_KEY << "Last Access Time: " << COLOR_VALUE << last_access << COLOR_RESET << "\n";
+                std::cout << COLOR_KEY << "Last Modify Time: " << COLOR_VALUE << last_modify << COLOR_RESET << "\n";
+                std::cout << COLOR_KEY << "Last Change Time: " << COLOR_VALUE << last_change << COLOR_RESET << "\n";
+            }
+
+            if (is_regular) {
+                std::cout << COLOR_KEY << "Size: " << COLOR_VALUE << file_size_pretty << COLOR_RESET << "\n";
+                std::cout << COLOR_KEY << "Checksum (SHA-256): " << COLOR_VALUE << checksum << COLOR_RESET << "\n";
+                if (!resolution.empty())
+                    std::cout << COLOR_KEY << "Resolution: " << COLOR_VALUE << resolution << COLOR_RESET << "\n";
+                if (!metadata.empty())
+                    std::cout << COLOR_KEY << "Metadata: " << COLOR_VALUE << metadata << COLOR_RESET << "\n";
+                if (!duration.empty())
+                    std::cout << COLOR_KEY << "Duration: " << COLOR_VALUE << duration << COLOR_RESET << "\n";
+            } else if (is_directory) {
+                std::cout << COLOR_KEY << "Total Size: " << COLOR_VALUE << format_size(total_size) << COLOR_RESET << "\n";
+                std::cout << COLOR_KEY << "File Count: " << COLOR_VALUE << file_count << COLOR_RESET << "\n";
+                std::cout << COLOR_KEY << "Directory Count: " << COLOR_VALUE << dir_count << COLOR_RESET << "\n";
+            }
         }
     } catch (const fs::filesystem_error &e) {
-        std::cerr << COLOR_ERROR << "Filesystem error: " << e.what() << COLOR_RESET << "\n";
+        if (json_mode) {
+            std::cout << "{\"error\":\"" << json_escape(e.what()) << "\"}\n";
+        } else {
+            std::cerr << COLOR_ERROR << "Filesystem error: " << e.what() << COLOR_RESET << "\n";
+        }
     }
 }
 
 int main(int argc, char* argv[]) {
-    // show command usage hint
-    if (argc != 2) {
-        std::cerr << COLOR_ERROR << "Usage: " << argv[0] << " <file_path>" << COLOR_RESET << "\n";
+    bool json_mode = false;
+    bool literal_mode = false;
+    std::vector<std::string> positional;
+
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (!literal_mode) {
+            if (arg == "--") {
+                literal_mode = true;
+                continue;
+            }
+            if (arg == "-h" || arg == "--help" || arg == "-help") {
+                print_help(argv[0]);
+                return 0;
+            }
+            if (arg == "--json") {
+                json_mode = true;
+                continue;
+            }
+        }
+        positional.push_back(arg);
+    }
+
+    if (positional.size() != 1) {
+        if (json_mode) {
+            std::cout << "{\"error\":\"Invalid arguments\"}\n";
+        } else {
+            std::cerr << COLOR_ERROR << "Usage: " << argv[0] << " [options] <path>" << COLOR_RESET << "\n";
+        }
         return 1;
     }
-    
-    // get file path argument
-    std::string file_path = argv[1];
-    
-    // show help
-    if (file_path == "-h" || file_path == "--help" || file_path == "-help") {
-        print_help(argv[0]);
-        return 0;
-    }
-    
-    // file info init
-    print_file_info(file_path);
+
+    print_file_info(positional.front(), json_mode);
     return 0;
 }
