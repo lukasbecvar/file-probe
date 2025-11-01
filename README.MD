@@ -9,6 +9,13 @@ Basic utility for get information about files and directories.
 file-probe <path>
 ```
 
+## Build from source
+```bash
+git clone git@github.com:lukasbecvar/file-probe.git
+cd file-probe
+make
+```
+
 ## Installation
 ```bash
 git clone git@github.com:lukasbecvar/file-probe.git

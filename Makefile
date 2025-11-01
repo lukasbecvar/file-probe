@@ -1,28 +1,41 @@
-# compiler settings
-CXX            = g++
-PKG_CONFIG    ?= pkg-config
-FFMPEG_CFLAGS := $(shell $(PKG_CONFIG) --cflags libavformat 2>/dev/null)
-FFMPEG_LIBS   := $(shell $(PKG_CONFIG) --libs libavformat 2>/dev/null)
+TARGET      ?= file-probe
+CXX         ?= g++
+PKG_CONFIG  ?= pkg-config
+BUILD_DIR   ?= build
+SRC_DIR     := src
 
-ifeq ($(FFMPEG_LIBS),)
+FFMPEG_CFLAGS := $(shell $(PKG_CONFIG) --cflags libavformat libavcodec libavutil 2>/dev/null)
+FFMPEG_LIBS   := $(shell $(PKG_CONFIG) --libs libavformat libavcodec libavutil 2>/dev/null)
+
+ifeq ($(strip $(FFMPEG_LIBS)),)
 FFMPEG_LIBS = -lavformat -lavcodec -lavutil -lswresample -lswscale
 endif
 
-CXXFLAGS = -std=c++17 -O2 -Wall $(FFMPEG_CFLAGS)
-LIBS     = $(FFMPEG_LIBS) -lm
-TARGET   = file-probe
-SRC      = file-probe.cpp
+SOURCES := $(wildcard $(SRC_DIR)/*.cpp)
+OBJECTS := $(patsubst $(SRC_DIR)/%.cpp,$(BUILD_DIR)/%.o,$(SOURCES))
+DEPFILES := $(OBJECTS:.o=.d)
 
-# default target: build the binary
+CXXFLAGS += -std=c++17 -Wall -Wextra -Wpedantic -Iinclude -I. $(FFMPEG_CFLAGS)
+DEPFLAGS ?= -MMD -MP
+
+.PHONY: all clean install uninstall
+
 all: $(TARGET)
 
-$(TARGET): $(SRC)
-	$(CXX) $(CXXFLAGS) -o $(TARGET) $(SRC) $(LIBS)
+$(TARGET): $(OBJECTS)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(FFMPEG_LIBS) -lm
 
-# Install target: install the binary do /usr/local/bin
+$(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) -c $< -o $@
+
 install: $(TARGET)
 	install -Dm755 $(TARGET) /usr/local/bin/$(TARGET)
 
-# clean target: for deleting the binary
+uninstall:
+	rm -f /usr/local/bin/$(TARGET)
+
 clean:
-	rm -f $(TARGET)
+	rm -rf $(BUILD_DIR) $(TARGET)
+
+-include $(DEPFILES)
